@@ -1,0 +1,14 @@
+{
+ "anchors": {"s0_hook": 0.0, "s1_beldum": 50.44, "s2_metang": 142.87, "s3_metagross": 193.34, "s4_shadow": 275.11, "s5_stevens": 340.87, "s6_mega": 407.61, "s7_ranking": 500.22, "end": 579.15},
+ "sections": {
+  "s0_hook": {"start": 0.0, "dur": 50.44},
+  "s1_beldum": {"start": 50.44, "dur": 92.43},
+  "s2_metang": {"start": 142.87, "dur": 50.47},
+  "s3_metagross": {"start": 193.34, "dur": 81.77},
+  "s4_shadow": {"start": 275.11, "dur": 65.76},
+  "s5_stevens": {"start": 340.87, "dur": 66.74},
+  "s6_mega": {"start": 407.61, "dur": 92.61},
+  "s7_ranking": {"start": 500.22, "dur": 79.37}
+ },
+ "beats": {"worst_to_best": 48.64, "ultra_balls": 90.72, "knock_itself_out": 112.86, "crash_together": 141.21, "fusion_line": 153.02, "jet": 174.62, "quote1": 210.84, "meteor_mash": 260.11, "seventy_eight": 392.27, "mega_reveal": 407.61, "quote2": 484.31, "vote_cta": 562.17, "salamence_tease": 572.91}
+}
