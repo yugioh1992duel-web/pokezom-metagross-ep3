@@ -331,9 +331,11 @@ for o in meshes:
         slot = o.material_slots[p.material_index]
         if not slot.material or 'BodyB' not in slot.material.name:
             continue
-        us = [uvd[li].uv[0] for li in p.loop_indices]
-        vs = [uvd[li].uv[1] for li in p.loop_indices]
-        if _classify(_sample('BodyB', sum(us) / len(us), sum(vs) / len(vs))) == 'GOLD':
+        # ANY-loop test, not the face mean: a polygon straddling the gold
+        # patch edge renders partly gold even when its mean samples teal
+        # (two gold specks survived the mean test on the first pass).
+        if any(_classify(_sample('BodyB', uvd[li].uv[0], uvd[li].uv[1])) == 'GOLD'
+               for li in p.loop_indices):
             for li in p.loop_indices:
                 uvd[li].uv[0] = 1.0 - uvd[li].uv[0]
             _swept += 1
