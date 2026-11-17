@@ -1,0 +1,138 @@
+# Pokezom #1-form turntable — GitHub Actions (production, adopted Nov 16, 2026)
+# Renders the Blender turntable on a GitHub runner instead of the local VM.
+#
+# The builder (scripts/build_turntable_param.py) is the v2 revision the user
+# approved with the Mega Metagross proof: X hover-attack pose (shoulders
+# posed on the HOME rig), a +/-50 deg front-arc pendulum sweep instead of a
+# 360 deg spin (the face stays on screen), and per-angle camera fitting that
+# holds the hero at 85-90% of frame height. Lighting/materials are the locked
+# proof recipe. FIRST RUN for any asset: mode=stills (4 arc samples) to
+# verify form, pose, textures and framing before the sequence.
+#
+# WHY: the Mega Metagross proof renders ~30 s/frame on the local 1.5-vCPU,
+# GPU-less VM (150 frames ≈ 75 min). A GitHub standard runner has ~4 vCPU,
+# so the same 150 frames should land in roughly 25–35 min — an estimate, not
+# a promise; the first run will measure it. Iteration (sourcing, test stills,
+# framing) still happens locally, where each still can be seen in minutes;
+# the pure grind moves to GitHub once the look is locked.
+#
+# SAFETY (the part that matters): the ripped model is NEVER committed to the
+# repo. This workflow downloads the GLB + textures from their public GitHub
+# mirrors at render time, renders, and uploads ONLY the finished PNG frames
+# as the artifact. The runner workspace is wiped after the run. This is the
+# same protection as the episode renders, which only ever push our own HTML.
+#
+# SETUP: place this file at .github/workflows/render-turntable.yml in the
+# episode repo (next to render-episode.yml) and commit the builder script at
+# scripts/build_turntable_param.py (parameterized copy of the Metagross proof
+# builder — same lighting rig, materials, camera and adaptive Cycles settings).
+#
+# FIRST RUN: dispatch with mode=stills first (4 hero angles, a few minutes)
+# to verify the form and textures, then mode=sequence for the full turntable.
+# That is the same "test one before the set" rule as every other build.
+name: render-turntable
+on:
+  workflow_dispatch:
+    inputs:
+      asset_code:
+        description: 'HOME asset code, e.g. pm0376_51_00 (Mega Metagross)'
+        required: true
+        default: 'pm0376_51_00'
+      glb_path:
+        description: 'Path inside Lilothestitch16/Pokemon-HOME-GLB-Models'
+        required: true
+        default: 'Pokemon (Generation 3)/pm0376_51_00.glb'
+      texture_dir:
+        description: 'Dir inside Lilothestitch16/Pokemon-HOME-Unity-Models holding the textures'
+        required: true
+        default: 'Mitake08oras/Assets/sandbox/models/08oras/pm0376_51_00/fbx/textures'
+      mode:
+        description: 'stills (4 arc samples: -50/-15/+15/+50 deg) or sequence (full sweep)'
+        required: true
+        type: choice
+        options: [sequence, stills]
+        default: 'sequence'
+      seconds:
+        description: 'Sweep length in seconds (sequence mode)'
+        required: true
+        default: '5'
+      fps:
+        description: 'Frames per second (sequence mode)'
+        required: true
+        default: '30'
+      res:
+        description: 'Sequence frame height in px (stills always render 1080p)'
+        required: true
+        default: '720'
+      samples:
+        description: 'Cycles samples (proof used 32 with adaptive sampling)'
+        required: true
+        default: '32'
+jobs:
+  render-turntable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup
+          df -h /
+      - uses: actions/checkout@v4
+      - name: Install Blender 4.2.3 LTS
+        # Same version as the local proof (blender --version: 4.2.3 LTS).
+        # URL verified Nov 16, 2026 against Blender's release index:
+        # blender-4.2.3-linux-x64.tar.xz, 351,870,156 bytes, 15-Oct-2024.
+        run: |
+          curl -fL -o blender.tar.xz https://download.blender.org/release/Blender4.2/blender-4.2.3-linux-x64.tar.xz
+          tar -xf blender.tar.xz
+          ./blender-4.2.3-linux-x64/blender --version
+      - name: Fetch model + textures at render time (never committed)
+        env:
+          ASSET: ${{ inputs.asset_code }}
+          GLB_PATH: ${{ inputs.glb_path }}
+          TEX_DIR: ${{ inputs.texture_dir }}
+        run: |
+          python3 - <<'PY'
+          import os, urllib.parse, urllib.request
+          asset = os.environ["ASSET"]
+          glb_repo = "Lilothestitch16/Pokemon-HOME-GLB-Models"
+          tex_repo = "Lilothestitch16/Pokemon-HOME-Unity-Models"
+          os.makedirs("work/model", exist_ok=True)
+          os.makedirs("work/textures", exist_ok=True)
+          def fetch(repo, path, dest):
+              url = "https://raw.githubusercontent.com/" + repo + "/main/" + urllib.parse.quote(path)
+              print("GET", url)
+              urllib.request.urlretrieve(url, dest)
+              print("OK", dest, os.path.getsize(dest), "bytes")
+          fetch(glb_repo, os.environ["GLB_PATH"], "work/model/model.glb")
+          for suffix in ("BodyA_col", "BodyB_col", "BodyC_col", "Eye_col"):
+              try:
+                  fetch(tex_repo, os.environ["TEX_DIR"] + f"/{asset}_{suffix}.png",
+                        f"work/textures/{asset}_{suffix}.png")
+              except Exception as e:
+                  # Some forms have no BodyC; the builder skips missing
+                  # textures with a warning instead of failing.
+                  print("SKIP (missing upstream):", suffix, e)
+          PY
+          ls -l work/model work/textures
+      - name: Render turntable
+        run: |
+          ./blender-4.2.3-linux-x64/blender -b --python scripts/build_turntable_param.py -- \
+            ${{ inputs.mode }} CYCLES ${{ inputs.samples }} ${{ inputs.res }} \
+            ${{ inputs.fps }} ${{ inputs.seconds }} ${{ inputs.asset_code }} \
+            work/model/model.glb work/textures work/out
+      - name: Verify frames landed
+        run: |
+          echo "stills:"; ls work/out/stills/ 2>/dev/null | wc -l
+          echo "sequence frames:"; ls work/out/sequence/ 2>/dev/null | wc -l
+          test -n "$(ls work/out/stills/ work/out/sequence/ 2>/dev/null)"
+      - uses: actions/upload-artifact@v4
+        with:
+          # Rendered frames ONLY — the model dir is deliberately not uploaded.
+          name: turntable-${{ inputs.asset_code }}
+          path: |
+            work/out/stills/*.png
+            work/out/sequence/*.png
+          if-no-files-found: error
+          retention-days: 2
