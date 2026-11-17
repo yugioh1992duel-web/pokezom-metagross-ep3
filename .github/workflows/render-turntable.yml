@@ -71,7 +71,10 @@ on:
 jobs:
   render-turntable:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # 180 = safety valve: measured ~70 s/frame at 1080p (stills run, Nov 16)
+    # puts 150 frames of 720p at ~78 min; a kill at the old 120 cap would
+    # waste the whole run.
+    timeout-minutes: 180
     steps:
       - name: Free disk space
         run: |
