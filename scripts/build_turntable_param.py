@@ -33,7 +33,32 @@ Usage: blender -b --python build_turntable_param.py -- <mode> <engine> <samples>
 Texture files that do not exist for a form (e.g. no BodyC) are skipped with a
 warning instead of failing the render; the material keeps its steel recipe.
 Env: STILLS_RES (stills height px, default 1080) — local iteration aid only.
+
+STANDING LAWS for every future #1-form build (user-adopted Nov 16, 2026):
+  1. MIRROR IS THE MASTER DEFAULT: every image texture node is created with
+     extension='MIRROR'. Ripped HOME models carry UVs outside [0,1] whose
+     source layout relies on mirrored wrapping; REPEAT samples the wrong
+     side of the sheet. Slot wiring is verified in the build log (SLOT
+     lines): BodyA materials -> BodyA sheet, BodyB -> BodyB, BodyC -> BodyC,
+     Eye -> Eye, matched on the material-name family.
+  2. UV REPAIR PASS (below, runs on every build): the GLB conversion folds
+     mirrored UV islands (measured on pm0376_51_00: the face assembly's
+     islands are exact U-mirror pairs, but the BodyB sheet paints its gold
+     patch only under the left island, so the right half of the face X
+     sampled teal; leg islands likewise landed on the gold patch). The pass
+     (a) canonicalizes all UVs into [0,1] (repeat-equivalent positions, so
+     MIRROR and REPEAT agree), (b) U-mirrors face faces whose island was
+     folded (teal sample + gold mirror-sample), (c) transplants other
+     canon-wrong components (gold on legs, grey armour / teal claws on
+     arms) onto their verified twin islands. Colours come only from the
+     game's own sheets — nothing is hand-painted.
+  3. 2D CROSS-CHECK GATE: after the GitHub stills check, compare the 3D
+     still against the Pokemon's official 2D art before any sequence
+     dispatch. Hard-fail on asymmetrical/missing key colour markings,
+     elemental parts rendering as opaque plastic/black/white, or a stiff
+     bind/T-pose.
 """
+
 import bpy, os, math, sys
 from mathutils import Vector
 
@@ -89,6 +114,7 @@ for mat in bpy.data.materials:
         if os.path.exists(texpath):
             img = bpy.data.images.load(texpath)
             tex = nt.nodes.new("ShaderNodeTexImage"); tex.image = img
+            tex.extension = 'MIRROR'
             nt.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
         else:
             print("TEXTURE MISSING, skipped:", texfile)
@@ -102,6 +128,216 @@ for mat in bpy.data.materials:
         if "Coat Weight" in bsdf.inputs:
             bsdf.inputs["Coat Weight"].default_value = 0.25
             bsdf.inputs["Coat Roughness"].default_value = 0.3
+
+# ---------- SLOT VERIFICATION (standing law 1) ----------
+for o in meshes:
+    for slot in o.material_slots:
+        if slot.material:
+            tf = next((f for k, f in TEXMAP if k in slot.material.name), None)
+            print("SLOT", o.name, "|", slot.material.name, "->", tf,
+                  "exists" if tf and os.path.exists(os.path.join(TEXDIR, tf)) else "MISSING")
+
+# ---------- UV REPAIR (standing law 2) ----------
+import collections as _col
+_PAL = {'GOLD': (193 / 255, 160 / 255, 33 / 255),
+        'TEAL': (56 / 255, 151 / 255, 183 / 255),
+        'GREY': (185 / 255, 188 / 255, 189 / 255)}
+_sheet_cache = {}
+def _sheet(key):
+    if key not in _sheet_cache:
+        img = bpy.data.images.load(os.path.join(TEXDIR, f"{ASSET}_{key}_col.png"))
+        _sheet_cache[key] = (img.size[0], img.size[1], img.pixels[:])
+    return _sheet_cache[key]
+def _sample(key, u, v):
+    w, h, px = _sheet(key)
+    x = min(w - 1, max(0, int((u % 1.0) * w)))
+    y = min(h - 1, max(0, int((v % 1.0) * h)))
+    i = (y * w + x) * 4
+    return px[i], px[i + 1], px[i + 2]
+def _classify(c):
+    for name, ref in _PAL.items():
+        if all(abs(c[k] - ref[k]) < 0.10 for k in range(3)):
+            return name
+    return None
+def _mat_sheet(matname):
+    for k in ('BodyA', 'BodyB', 'BodyC', 'Eye'):
+        if k in matname:
+            return k
+    return None
+
+# (a) canonicalize all UVs into [0,1] — repeat-equivalent positions, so the
+#     MIRROR master default and REPEAT sample identically everywhere.
+for o in meshes:
+    if not o.data.uv_layers:
+        continue
+    for l in o.data.uv_layers.active.data:
+        l.uv[0] %= 1.0
+        l.uv[1] %= 1.0
+
+# (b) face X: U-mirror any BodyB face on BodyBSkin whose island was folded
+#     (samples the flat TEAL while its U-mirror samples the flat GOLD).
+_flips = 0
+for o in meshes:
+    if 'BodyBSkin' not in o.name:
+        continue
+    uvd = o.data.uv_layers.active.data
+    for p in o.data.polygons:
+        slot = o.material_slots[p.material_index]
+        if not slot.material or 'BodyB' not in slot.material.name:
+            continue
+        us = [uvd[li].uv[0] for li in p.loop_indices]
+        vs = [uvd[li].uv[1] for li in p.loop_indices]
+        mu = sum(us) / len(us); mv = sum(vs) / len(vs)
+        if (_classify(_sample('BodyB', mu, mv)) == 'TEAL'
+                and _classify(_sample('BodyB', 1.0 - mu, mv)) == 'GOLD'):
+            for li in p.loop_indices:
+                uvd[li].uv[0] = 1.0 - uvd[li].uv[0]
+            _flips += 1
+print("UV REPAIR face flips:", _flips)
+
+# (c) component twin transplants: a component whose sampled colour is
+#     canon-wrong is remapped (affine, island bbox -> twin island bbox) onto
+#     its verified mirrored twin's island.
+def _components(o, mat_idx):
+    polys = [p for p in o.data.polygons if p.material_index == mat_idx]
+    edge_faces = _col.defaultdict(list)
+    for p in polys:
+        for e in p.edge_keys:
+            edge_faces[e].append(p.index)
+    adj = _col.defaultdict(set)
+    for fs in edge_faces.values():
+        for f in fs:
+            adj[f].update(g for g in fs if g != f)
+    comps, seen = [], set()
+    for p in polys:
+        if p.index in seen:
+            continue
+        stack = [p.index]; comp = []; seen.add(p.index)
+        while stack:
+            f = stack.pop(); comp.append(f)
+            for g in adj[f]:
+                if g not in seen:
+                    seen.add(g); stack.append(g)
+        comps.append(comp)
+    return comps
+
+def _comp_info(o, uvd, comp):
+    ps = [o.data.polygons[i] for i in comp]
+    cents = [o.matrix_world @ p.center for p in ps]
+    cen = tuple(sum(c[k] for c in cents) / len(cents) for k in range(3))
+    us = [uvd[li].uv[0] for p in ps for li in p.loop_indices]
+    vs = [uvd[li].uv[1] for p in ps for li in p.loop_indices]
+    return cen, (min(us), max(us)), (min(vs), max(vs)), ps
+
+def _comp_color(key, uvd, ps):
+    # majority vote over per-point classifications — robust for islands that
+    # straddle a patch border (an averaged colour would classify as neither)
+    pts = [(uvd[li].uv[0], uvd[li].uv[1]) for p in ps for li in p.loop_indices]
+    step = max(1, len(pts) // 60)
+    votes = {}
+    for (u, v) in pts[::step]:
+        c = _classify(_sample(key, u, v))
+        if c:
+            votes[c] = votes.get(c, 0) + 1
+    if not votes:
+        return None
+    best, n = max(votes.items(), key=lambda kv: kv[1])
+    return best if n >= 0.4 * (len(pts[::step])) else None
+
+# (mesh substr, material substr, mode, wrong, target)
+#   PAIR:   twins are exactly {wrong, target} -> remap the wrong side onto
+#           the target side's island
+#   NOT:    exactly one twin is `target` -> remap the other side (whatever
+#           non-target colour it samples) onto the target side's island
+#   ESCAPE: one twin is `wrong`, the other is a different known colour ->
+#           remap the wrong side onto its twin's island
+_RULES = [('Leg', 'BodyB', 'ESCAPE', 'GOLD', None),
+          ('Arm', 'BodyCEnv00', 'NOT', None, 'TEAL'),
+          ('Arm', 'BodyCEnv01', 'PAIR', 'TEAL', 'GREY'),
+          ('BodyBSkin', 'BodyBEnv01', 'PAIR', 'GREY', 'TEAL')]
+_transplants = 0
+for o in meshes:
+    if not o.data.uv_layers:
+        continue
+    uvd = o.data.uv_layers.active.data
+    for idx, slot in enumerate(o.material_slots):
+        if not slot.material:
+            continue
+        mname = slot.material.name
+        key = _mat_sheet(mname)
+        rules = [r for r in _RULES if r[0] in o.name and r[1] in mname]
+        if not key or not rules:
+            continue
+        comps = _components(o, idx)
+        infos = {}
+        for comp in comps:
+            cen, ub, vb, ps = _comp_info(o, uvd, comp)
+            infos[id(comp)] = (cen, ub, vb, ps, _comp_color(key, uvd, ps))
+        done = set()
+        for comp in comps:
+            if id(comp) in done:
+                continue
+            cen, ub, vb, ps, col = infos[id(comp)]
+            if cen[0] > -0.02:
+                continue
+            for comp2 in comps:
+                if comp2 is comp or id(comp2) in done:
+                    continue
+                cen2, ub2, vb2, ps2, col2 = infos[id(comp2)]
+                if not (abs(cen2[0] + cen[0]) < 0.03 and abs(cen2[1] - cen[1]) < 0.03
+                        and abs(cen2[2] - cen[2]) < 0.03 and len(comp2) == len(comp)):
+                    continue
+                # mirrored twin pair found: apply the first matching rule
+                for (_, _, mode, wrong, target) in rules:
+                    src = dst = None
+                    if mode == 'PAIR':
+                        if col == wrong and col2 == target:
+                            src, dst = (ub, vb, ps), (ub2, vb2)
+                        elif col2 == wrong and col == target:
+                            src, dst = (ub2, vb2, ps2), (ub, vb)
+                    elif mode == 'NOT':
+                        if col == target and col2 != target:
+                            src, dst = (ub2, vb2, ps2), (ub, vb)
+                        elif col2 == target and col != target:
+                            src, dst = (ub, vb, ps), (ub2, vb2)
+                    elif mode == 'ESCAPE':
+                        if col == wrong and col2 not in (None, wrong):
+                            src, dst = (ub, vb, ps), (ub2, vb2)
+                        elif col2 == wrong and col not in (None, wrong):
+                            src, dst = (ub2, vb2, ps2), (ub, vb)
+                    if src:
+                        (su, sv, sps), (tu, tv) = src, dst
+                        du = max(1e-6, su[1] - su[0]); dv = max(1e-6, sv[1] - sv[0])
+                        for p in sps:
+                            for li in p.loop_indices:
+                                uvd[li].uv[0] = tu[0] + (uvd[li].uv[0] - su[0]) * (tu[1] - tu[0]) / du
+                                uvd[li].uv[1] = tv[0] + (uvd[li].uv[1] - sv[0]) * (tv[1] - tv[0]) / dv
+                        _transplants += 1
+                        print("UV REPAIR transplant:", o.name, mname, len(sps), "faces", wrong, "->", target)
+                        done.add(id(comp)); done.add(id(comp2))
+                        break
+                break
+print("UV REPAIR transplants:", _transplants)
+
+# (d) leg gold sweep: any leg face still sampling GOLD after the transplants
+#     (unpaired or twin-less leftovers) is U-mirrored — the gold patch ends
+#     at u=0.44, so a mirrored face (u -> 1-u >= 0.56) can never land on it.
+_swept = 0
+for o in meshes:
+    if 'Leg' not in o.name:
+        continue
+    uvd = o.data.uv_layers.active.data
+    for p in o.data.polygons:
+        slot = o.material_slots[p.material_index]
+        if not slot.material or 'BodyB' not in slot.material.name:
+            continue
+        us = [uvd[li].uv[0] for li in p.loop_indices]
+        vs = [uvd[li].uv[1] for li in p.loop_indices]
+        if _classify(_sample('BodyB', sum(us) / len(us), sum(vs) / len(vs))) == 'GOLD':
+            for li in p.loop_indices:
+                uvd[li].uv[0] = 1.0 - uvd[li].uv[0]
+            _swept += 1
+print("UV REPAIR leg gold sweep:", _swept)
 
 # ---------- POSE: X hover-attack stance (shoulders only) ----------
 # The bind pose hangs all four arms vertically like pillars (user audit of the
